@@ -2,10 +2,8 @@
 #
 # Installation :
 #   pip install -r requirements.txt
-#
-# kraken doit être installé dans l'environnement conda/venv existant.
-# Si ce n'est pas le cas : pip install kraken
 
 numpy>=1.24
 Pillow>=9.0
 scikit-learn>=1.3
+kraken
