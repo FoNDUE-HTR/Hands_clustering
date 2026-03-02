@@ -1,40 +1,55 @@
 # htr_active_learning.py
 
-Active learning pour l'HTR : identifie les styles d'écriture difficiles dans
-un jeu de test transcrit, puis classe un stock de pages non transcrites par
-ordre d'utilité pour l'entraînement.
+Active learning for HTR: identifies difficult handwriting styles in a
+transcribed test set, then ranks an untranscribed image stock by order of
+usefulness for training.
 
 ---
 
-## Principe
+## Rationale
+
+The model performs poorly on certain handwriting styles. The goal is to find,
+in a stock of untranscribed pages, those that most resemble these difficult
+styles — so they can be transcribed first and used to improve training data
+where it matters most.
 
 ```
-Jeu de test (ALTO + images)
+Test set (ALTO + transcribed images)
         │
         ▼
-  [analyze] ── Clustering par style ──► Quels styles sont mal reconnus ?
+  [analyze] → clustering by handwriting style + CER per page
         │
         ▼
-  cluster_model.pkl + cer_per_page.json
+  cluster_model.pkl    ← PCA reference space
+  cer_per_page.json    ← measured CER per page
         │
         ▼
-  [rank] ── Stock d'images brutes ──► Dans quel ordre les transcrire ?
+  [rank] → untranscribed images projected into PCA space
         │
         ▼
-  ranked_pages.txt + rapport HTML
+  ranked_pages.txt     ← pages to transcribe first
+  rapport_recommandations.html
 ```
 
-**Étape 1 — `analyze`** :
-- Binarise chaque page (Otsu), extrait des features visuelles (histogramme + géométrie des lignes)
-- Regroupe les pages par style d'écriture similaire (PCA + k-means, k optimal automatique)
-- Calcule le CER de chaque page avec `ketos test`
-- Produit un rapport HTML interactif + deux fichiers intermédiaires
+**Step 1 — `analyze`** :
+- Binarizes each page (Otsu thresholding, pure numpy), extracts visual features
+  (greyscale histogram + line geometry)
+- Groups pages by similar handwriting style using PCA + k-means;
+  the number of clusters k is chosen automatically (best silhouette score over k=2..k_max)
+- Computes the real CER for each page using `ketos test`
+- Produces an interactive HTML report + two intermediate files for `rank`
 
-**Étape 2 — `rank`** :
-- Binarise les images brutes du stock (Otsu), les segmente avec `kraken segment`
-- Projette chaque image dans l'espace PCA calculé à l'étape 1
-- Score d'utilité = CER moyen du cluster le plus proche + bonus diversité
-- Produit une liste ordonnée des pages à transcrire en priorité
+**Step 2 — `rank`** :
+- Binarizes stock images (same Otsu pipeline), segments them with
+  `kraken segment -bl` to extract line geometry
+- Projects each image into the PCA space computed in step 1
+- Assigns each image an **estimated CER** = mean CER of the nearest reference
+  cluster in PCA space. This is not a measured CER (there is no reference
+  transcription) but a proxy estimate: "this page looks like the pages in
+  cluster X, which had a mean CER of Y%"
+- Ranks by descending score with a diversity bonus to avoid recommending
+  dozens of near-identical pages
+- Produces an ordered list + HTML report
 
 ---
 
@@ -44,18 +59,15 @@ Jeu de test (ALTO + images)
 pip install -r requirements.txt
 ```
 
-Télécharger le modèle de segmentation kraken par défaut :
-
-```bash
-# Depuis https://github.com/mittagessen/kraken/blob/main/kraken/blla.mlmodel
-# Placer blla.mlmodel dans le répertoire de travail
-```
+`kraken` must be installed in the existing environment. Download the default
+segmentation model (`blla.mlmodel`) from:
+https://github.com/mittagessen/kraken/blob/main/kraken/blla.mlmodel
 
 ---
 
 ## Usage
 
-### Étape 1 — Analyser le jeu de test
+### Step 1 — Analyze the test set
 
 ```bash
 python htr_active_learning.py analyze \
@@ -64,28 +76,42 @@ python htr_active_learning.py analyze \
     --output_dir analysis/
 ```
 
-**Fichiers produits dans `analysis/` :**
+`test.txt` must list **ALTO (XML)** files, one per line. The corresponding
+image must be in the same folder with the same filename
+(`.jpg`, `.jpeg`, `.png`, `.tif` or `.tiff`).
 
-| Fichier | Description |
+```
+./test_2/page_001.xml
+./test_2/page_002.xml
+```
+
+If `test.txt` lists images (`.jpg`), convert it first:
+```bash
+sed 's/\.\(jpg\|jpeg\|png\|tif\|tiff\)$/.xml/' test.txt > test.txt
+```
+
+**Files produced in `analysis/`:**
+
+| File | Description |
 |---|---|
-| `rapport_clusters.html` | Rapport interactif (scatter PCA, CER par cluster, silhouette) |
-| `cluster_model.pkl` | Modèle PCA/clusters — requis pour `rank` |
-| `cer_per_page.json` | CER détaillé par page — requis pour `rank` |
+| `rapport_clusters.html` | Interactive report: PCA scatter, CER per cluster, silhouette/elbow curves |
+| `cluster_model.pkl` | PCA space + clusters — required for `rank` |
+| `cer_per_page.json` | Measured CER per page — required for `rank` |
 
-**Options :**
+**Options:**
 
-| Option | Défaut | Description |
+| Option | Default | Description |
 |---|---|---|
-| `--test_txt` | — | Fichier `.txt` listant les fichiers ALTO du jeu de test (un par ligne) |
-| `--model` | — | Modèle ketos (`.mlmodel`) utilisé pour `ketos test` |
-| `--output_dir` | `analysis/` | Dossier de sortie |
-| `--k_max` | `10` | Nombre maximum de clusters à tester |
-| `--skip_cer` | false | Sauter le calcul du CER (plus rapide, pas de rapport de performance) |
-| `--use_kraken` | false | Features extraites du modèle ketos (plus lent, plus précis) |
+| `--test_txt` | — | File listing the ALTO files of the test set |
+| `--model` | — | ketos model (`.mlmodel`) used for `ketos test` |
+| `--output_dir` | `analysis/` | Output directory |
+| `--k_max` | `10` | Maximum number of clusters to test |
+| `--skip_cer` | false | Skip CER computation (faster, for testing clustering only) |
+| `--use_kraken` | false | Extract features from the ketos model rather than the image (slower) |
 
 ---
 
-### Étape 2 — Classer le stock d'images à transcrire
+### Step 2 — Rank the untranscribed stock
 
 ```bash
 python htr_active_learning.py rank \
@@ -94,114 +120,90 @@ python htr_active_learning.py rank \
     --top_n      50
 ```
 
-`--output_dir` doit être le même que pour `analyze` : le script y cherche
-automatiquement `cluster_model.pkl` et `cer_per_page.json`.
+`--output_dir` must be the same as for `analyze`: the script automatically
+loads `cluster_model.pkl` and `cer_per_page.json` from there.
 
-**Fichiers produits :**
+**Files produced:**
 
-| Fichier | Description |
+| File | Description |
 |---|---|
-| `rapport_recommandations.html` | Rapport interactif avec projection PCA et tableau de classement |
-| `ranked_pages.txt` | Liste ordonnée des chemins d'images (une par ligne, du plus utile au moins utile) |
-| `segmented/` | Fichiers JSON de segmentation kraken |
-| `segmented/binarized/` | Images binarisées (PNG) |
+| `rapport_recommandations.html` | Interactive report: PCA projection + ranking table |
+| `ranked_pages.txt` | Image paths ordered from most to least useful |
+| `segmented/` | kraken segmentation JSON files |
+| `segmented/binarized/` | Binarized images (PNG) |
 
-**Options :**
+**Options:**
 
-| Option | Défaut | Description |
+| Option | Default | Description |
 |---|---|---|
-| `--images_dir` | — | Dossier contenant les images brutes à classer |
-| `--output_dir` | `analysis/` | Dossier contenant `cluster_model.pkl` et `cer_per_page.json` |
-| `--cluster_model` | `<output_dir>/cluster_model.pkl` | Chemin explicite vers le `.pkl` |
-| `--cer_json` | `<output_dir>/cer_per_page.json` | Chemin explicite vers le JSON de CER |
-| `--top_n` | `50` | Nombre de pages à retenir dans le classement |
-| `--diversity` | `0.3` | Coefficient de diversité `0..1` — `0` = cibler uniquement les clusters difficiles, `1` = maximiser la diversité des styles |
-| `--seg_model` | `blla.mlmodel` | Modèle de segmentation kraken |
-| `--skip_segment` | false | Ne pas segmenter, utiliser les JSON existants dans `images_dir` |
+| `--images_dir` | — | Folder containing the raw images to rank |
+| `--output_dir` | `analysis/` | Folder containing `cluster_model.pkl` and `cer_per_page.json` |
+| `--cluster_model` | `<output_dir>/cluster_model.pkl` | Explicit path to the `.pkl` |
+| `--cer_json` | `<output_dir>/cer_per_page.json` | Explicit path to the CER JSON |
+| `--top_n` | `50` | Number of pages to retain in the ranking |
+| `--diversity` | `0.3` | Diversity coefficient `0..1` |
+| `--seg_model` | `blla.mlmodel` | kraken segmentation model |
+| `--skip_segment` | false | Skip segmentation, use existing JSON files in `images_dir` |
 
 ---
 
-## Le coefficient de diversité
+## CER in the `rank` report
 
-Sans diversité (`--diversity 0`), le classement recommanderait des dizaines
-de pages au style quasi-identique appartenant au cluster le plus difficile.
+The `rapport_recommandations.html` report displays an **estimated CER**, not a
+measured one. Each stock image is projected into the PCA space of the
+transcribed pages and matched to the nearest cluster. The CER shown is the
+mean CER of that cluster, as measured during the `analyze` step.
 
-Avec diversité, un bonus est accordé aux pages éloignées des pages déjà
-sélectionnées dans l'espace PCA, ce qui garantit une couverture plus large
-des styles difficiles.
-
-Valeurs conseillées : `0.2`–`0.5`. Au-delà, la diversité l'emporte sur la
-performance et des pages de clusters faciles peuvent remonter dans le classement.
+This is a proxy estimate: "this image looks like the pages in cluster 3,
+which had a mean CER of 45.9%".
 
 ---
 
-## Format des fichiers d'entrée
+## The diversity coefficient
 
-### `test.txt` (et fichiers similaires)
+With `--diversity 0`, the ranking would recommend dozens of near-identical
+pages from the most difficult cluster. With diversity enabled, a bonus is
+given to pages that are far from already-selected pages in PCA space,
+ensuring broader coverage of difficult styles.
 
-Un chemin absolu vers un fichier ALTO par ligne. L'image correspondante doit
-se trouver dans le même dossier avec le même nom de fichier (`.jpg`, `.jpeg`,
-`.png`, `.tif` ou `.tiff`).
-
-```
-/data/nestor/test/page_001.xml
-/data/nestor/test/page_002.xml
-...
-```
-
-### Images du stock (`--images_dir`)
-
-Dossier plat contenant les images brutes (`.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`).
-Pas besoin de fichiers ALTO — la segmentation est faite automatiquement.
+Recommended values: `0.2`–`0.5`. Beyond that, diversity overrides performance
+and pages from easy clusters may rise in the ranking.
 
 ---
 
-## Dépendances
-
-- `kraken` — segmentation et test HTR (installé séparément via pip)
-- `Pillow` — traitement d'image
-- `scikit-learn` — PCA, k-means, silhouette score
-- `numpy` — calcul numérique
-
-Voir `requirements.txt` pour les versions exactes.
-
----
-
-## Exemple de workflow complet
+## Full workflow
 
 ```bash
-# 1. Installer les dépendances
+# 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Analyser le jeu de test (avec CER, ~quelques minutes)
+# 2. Check that test.txt lists XML files (not images)
+head -3 test.txt   # should show .xml paths
+
+# 3. Analyze the test set
 python htr_active_learning.py analyze \
     --test_txt   test.txt \
     --model      fondue_gd_fr_v3.mlmodel \
     --output_dir analysis/
 
-# 3. Ouvrir le rapport pour inspecter les clusters
+# 4. Open the clustering report
 open analysis/rapport_clusters.html
 
-# 4. Classer le stock (segmentation automatique)
+# 5. Rank the stock
 python htr_active_learning.py rank \
     --images_dir /data/stock/ \
     --output_dir analysis/ \
-    --top_n 100 \
-    --diversity 0.3
+    --top_n 100
 
-# 5. Consulter les recommandations
+# 6. Browse the recommendations
 open analysis/rapport_recommandations.html
-cat analysis/ranked_pages.txt | head -20
-
-# 6. Optionnel : analyser sans CER (rapide, pour tester)
-python htr_active_learning.py analyze \
-    --test_txt test.txt \
-    --model fondue_gd_fr_v3.mlmodel \
-    --skip_cer
-
-# 7. Optionnel : utiliser un modèle de segmentation custom
-python htr_active_learning.py rank \
-    --images_dir /data/stock/ \
-    --output_dir analysis/ \
-    --seg_model mon_modele_seg.mlmodel
+head -20 analysis/ranked_pages.txt
 ```
+
+---
+
+## License
+
+This project is licensed under the **GNU General Public License v3.0**.
+See the [LICENSE](LICENSE) file for details, or visit
+https://www.gnu.org/licenses/gpl-3.0.html.
