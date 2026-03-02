@@ -1,4 +1,4 @@
-# htr_active_learning.py
+# Active learning strategy for HTR
 
 Active learning for HTR: identifies difficult handwriting styles in a
 transcribed test set, then ranks an untranscribed image stock by order of
